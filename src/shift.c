@@ -39,15 +39,15 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
             size  = SIZEOF(this);
             xrows = length(this);
             switch (TYPEOF(this)) {
-                case INTSXP : 
+                case INTSXP :
                     thisfill = PROTECT(coerceVector(fill, INTSXP));
                     for (j=0; j<nk; j++) {
                         thisk = (xrows >= INTEGER(k)[j]) ? INTEGER(k)[j] : xrows;
                         tmp = allocVector(INTSXP, xrows);
                         SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0)
-                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size), 
-                                   (char *)DATAPTR(this), 
+                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size),
+                                   (char *)DATAPTR(this),
                                    (xrows-INTEGER(k)[j])*size);
                         for (m=0; m<thisk; m++)
                             INTEGER(tmp)[m] = INTEGER(thisfill)[0];
@@ -63,7 +63,7 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         thisfill = PROTECT(allocVector(REALSXP, 1));
                         dthisfill = (unsigned long long *)REAL(thisfill);
                         if (INTEGER(fill)[0] == NA_INTEGER)
-                            dthisfill[0] = NAINT64;
+                            dthisfill[0] = NA_INT64_LL;
                         else dthisfill[0] = (unsigned long long)INTEGER(fill)[0];
                     } else {
                         thisfill = PROTECT(coerceVector(fill, REALSXP));
@@ -73,16 +73,14 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         tmp = allocVector(REALSXP, xrows);
                         SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0) {
-                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size), 
-                                   (char *)DATAPTR(this), 
+                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size),
+                                   (char *)DATAPTR(this),
                                    (xrows-INTEGER(k)[j])*size);
                         }
                         for (m=0; m<thisk; m++) {
                             REAL(tmp)[m] = REAL(thisfill)[0];
                         }
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
                 break;
 
@@ -93,14 +91,12 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         tmp = allocVector(LGLSXP, xrows);
                         SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0)
-                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size), 
-                                   (char *)DATAPTR(this), 
+                            memcpy((char *)DATAPTR(tmp)+(INTEGER(k)[j]*size),
+                                   (char *)DATAPTR(this),
                                    (xrows-INTEGER(k)[j])*size);
                         for (m=0; m<thisk; m++)
                             LOGICAL(tmp)[m] = LOGICAL(thisfill)[0];
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
                 break;
 
@@ -112,10 +108,20 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         for (m=0; m<xrows; m++)
                             SET_STRING_ELT(tmp, m, (m < INTEGER(k)[j]) ? STRING_ELT(thisfill, 0) : STRING_ELT(this, m - INTEGER(k)[j]));
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
                 break;
+
+		case VECSXP :
+		    thisfill = PROTECT(coerceVector(fill, VECSXP));
+		    for (j=0; j<nk; j++) {
+			tmp = allocVector(VECSXP, xrows);
+			SET_VECTOR_ELT(ans, i*nk+j, tmp);
+			for (m=0; m<xrows; m++)
+			    SET_VECTOR_ELT(tmp, m, (m < INTEGER(k)[j]) ? VECTOR_ELT(thisfill, 0) : VECTOR_ELT(this, m - INTEGER(k)[j]));
+			copyMostAttrib(this, tmp);
+		    }
+		break;
+
                 default :
                     error("Unsupported type '%s'", type2char(TYPEOF(this)));
             }
@@ -130,15 +136,15 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
             size  = SIZEOF(this);
         	xrows = length(this);
         	switch (TYPEOF(this)) {
-        		case INTSXP : 
+        		case INTSXP :
                     thisfill = PROTECT(coerceVector(fill, INTSXP));
         			for (j=0; j<nk; j++) {
                         thisk = (xrows >= INTEGER(k)[j]) ? INTEGER(k)[j] : xrows;
     	    			tmp = allocVector(INTSXP, xrows);
         				SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0)
-                            memcpy((char *)DATAPTR(tmp), 
-                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size), 
+                            memcpy((char *)DATAPTR(tmp),
+                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size),
                                    (xrows-INTEGER(k)[j])*size);
                         for (m=xrows-thisk; m<xrows; m++)
                             INTEGER(tmp)[m] = INTEGER(thisfill)[0];
@@ -154,7 +160,7 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         thisfill = PROTECT(allocVector(REALSXP, 1));
                         dthisfill = (unsigned long long *)REAL(thisfill);
                         if (INTEGER(fill)[0] == NA_INTEGER)
-                            dthisfill[0] = NAINT64;
+                            dthisfill[0] = NA_INT64_LL;
                         else dthisfill[0] = (unsigned long long)INTEGER(fill)[0];
                     } else {
                         thisfill = PROTECT(coerceVector(fill, REALSXP));
@@ -164,14 +170,12 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         tmp = allocVector(REALSXP, xrows);
                         SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0)
-                            memcpy((char *)DATAPTR(tmp), 
-                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size), 
+                            memcpy((char *)DATAPTR(tmp),
+                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size),
                                    (xrows-INTEGER(k)[j])*size);
                         for (m=xrows-thisk; m<xrows; m++)
                             REAL(tmp)[m] = REAL(thisfill)[0];
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
         		break;
 
@@ -182,14 +186,12 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         tmp = allocVector(LGLSXP, xrows);
                         SET_VECTOR_ELT(ans, i*nk+j, tmp);
                         if (xrows - INTEGER(k)[j] > 0)
-                            memcpy((char *)DATAPTR(tmp), 
-                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size), 
+                            memcpy((char *)DATAPTR(tmp),
+                                   (char *)DATAPTR(this)+(INTEGER(k)[j]*size),
                                    (xrows-INTEGER(k)[j])*size);
                         for (m=xrows-thisk; m<xrows; m++)
                             LOGICAL(tmp)[m] = LOGICAL(thisfill)[0];
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
         		break;
 
@@ -201,10 +203,20 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
                         for (m=0; m<xrows; m++)
                             SET_STRING_ELT(tmp, m, (xrows-m <= INTEGER(k)[j]) ? STRING_ELT(thisfill, 0) : STRING_ELT(this, m + INTEGER(k)[j]));
                         copyMostAttrib(this, tmp);
-                        if (isFactor(this))
-                            setAttrib(tmp, R_LevelsSymbol, getAttrib(this, R_LevelsSymbol));
                     }
                 break;
+
+		case VECSXP :
+		    thisfill = PROTECT(coerceVector(fill, VECSXP));
+		    for (j=0; j<nk; j++) {
+			tmp = allocVector(VECSXP, xrows);
+			SET_VECTOR_ELT(ans, i*nk+j, tmp);
+			for (m=0; m<xrows; m++)
+			    SET_VECTOR_ELT(tmp, m, (xrows-m <= INTEGER(k)[j]) ? VECTOR_ELT(thisfill, 0) : VECTOR_ELT(this, m + INTEGER(k)[j]));
+			copyMostAttrib(this, tmp);
+		    }
+		break;
+
     	        default :
     	            error("Unsupported type '%s'", type2char(TYPEOF(this)));
         	}
@@ -212,7 +224,7 @@ SEXP shift(SEXP obj, SEXP k, SEXP fill, SEXP type) {
         }
     }
     UNPROTECT(1);
-    if (isVectorAtomic(obj) && length(ans) == 1) 
+    if (isVectorAtomic(obj) && length(ans) == 1)
         return (VECTOR_ELT(ans, 0));
     return(ans);
 }

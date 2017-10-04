@@ -5,7 +5,7 @@
 \title{ Subsetting data.tables }
 
 \description{
-  Retruns subsets of a \code{data.table}.
+  Returns subsets of a \code{data.table}.
 }
 
 \usage{
@@ -31,7 +31,7 @@
   The \code{subset} argument works on the rows and will be evaluated
   in the \code{data.table} so columns can be referred to (by name) as variables
   in the expression.
-  
+
   The \code{data.table} that is returned will maintain the original keys
   as long as they are not \code{select}-ed out.
 }

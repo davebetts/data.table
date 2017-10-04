@@ -1,6 +1,6 @@
 #include "data.table.h"
 #include <Rdefines.h>
-#include <Rmath.h> 
+#include <Rmath.h>
 #include <Rversion.h>
 
 static SEXP *saveds=NULL;
@@ -22,13 +22,14 @@ static void finalizer(SEXP p)
         // already, so nothing to do (but almost never the case).
         return;
     }
-    x = PROTECT(allocVector(VECSXP, 50));   // 50 so it's big enough to be on LargeVector heap. See NodeClassSize in memory.c:allocVector
-    SETLENGTH(x,50+n*2);  // 1*n for the names, 1*n for the VECSXP itself (both are over allocated)
+    x = PROTECT(allocVector(INTSXP, 50));  // 50 so it's big enough to be on LargeVector heap. See NodeClassSize in memory.c:allocVector
+                                           // INTSXP rather than VECSXP so that GC doesn't inspect contents after LENGTH (thanks to Karl Miller, Jul 2015)
+    SETLENGTH(x,50+n*2*sizeof(void *)/4);  // 1*n for the names, 1*n for the VECSXP itself (both are over allocated).
     UNPROTECT(1);
     return;
 }
 
-void setselfref(SEXP x) {   
+void setselfref(SEXP x) {
     SEXP p;
     // Store pointer to itself so we can detect if the object has been copied. See
     // ?copy for why copies are not just inefficient but cause a problem for over-allocated data.tables.
@@ -44,13 +45,13 @@ void setselfref(SEXP x) {
     ));
     R_RegisterCFinalizerEx(p, finalizer, FALSE);
     UNPROTECT(1);  // The PROTECT above is needed by --enable-strict-barrier (it seems, iiuc)
-    
+
 /*  *  base::identical doesn't check prot and tag of EXTPTR, just that the ptr itself is the
        same in both objects. R_NilValue is always equal to R_NilValue.  R_NilValue is a memory
        location constant within an R session, but can vary from session to session. So, it
        looks like a pointer to a user looking at attributes(DT), but they might wonder how it
        works if they realise the selfref of all data.tables all point to the same address (rather
-       than to the table itself which would be reasonable to expect given the attributes name).
+       than to the table itself which would be reasonable to expect given the attribute's name).
     *  p=NULL rather than R_NilValue works too, other than we need something other than NULL
        so we can detect tables loaded from disk (which set p to NULL, see 5.13 of R-exts).
     *  x is wrapped in another EXTPTR because of object.size (called by tables(), and by users).
@@ -66,6 +67,39 @@ void setselfref(SEXP x) {
        vector which required data.table to do a show/hide dance in a masked identical.
 */
 }
+
+/* There are two reasons the finalizer doesn't restore the LENGTH to TRUELENGTH. i) The finalizer
+happens too late after GC has already released the memory, and ii) copies by base R (e.g.
+[<- in write.table just before test 894) allocate at length LENGTH but copy the TRUELENGTH over.
+If the finalizer sets LENGTH to TRUELENGTH, that's a fail as it wasn't really allocated at
+TRUELENGTH when R did the copy.
+Karl Miller suggested an ENVSXP so that restoring LENGTH in finalizer should work. This is the
+closest I got to getting it to pass all tests :
+
+  SEXP env = PROTECT(allocSExp(ENVSXP));
+  defineVar(SelfRefSymbol, x, env);
+  defineVar(R_NamesSymbol, getAttrib(x, R_NamesSymbol), env);
+  setAttrib(x, SelfRefSymbol, p = R_MakeExternalPtr(
+    R_NilValue,         // for identical() to return TRUE. identical() doesn't look at tag and prot
+    R_NilValue, //getAttrib(x, R_NamesSymbol), // to detect if names has been replaced and its tl lost, e.g. setattr(DT,"names",...)
+    PROTECT(            // needed when --enable-strict-barrier it seems, iiuc. TO DO: test under that flag and remove if not needed.
+      env               // wrap x in env to avoid an infinite loop in object.size() if prot=x were here
+    )
+  ));
+  R_RegisterCFinalizerEx(p, finalizer, FALSE);
+  UNPROTECT(2);
+
+Then in finalizer:
+    SETLENGTH(names, tl)
+    SETLENGTH(dt, tl)
+
+and that finalizer indeed now happens before the GC releases memory (thanks to the env wrapper).
+
+However, we still have problem (ii) above and it didn't pass tests involving base R copies.
+
+We really need R itself to start setting TRUELENGTH to be the allocated length and then
+for GC to release TRUELENGTH not LENGTH.  Would really tidy this up.
+*/
 
 static int _selfrefok(SEXP x, Rboolean checkNames, Rboolean verbose) {
     SEXP v, p, tag, prot, names;
@@ -88,7 +122,7 @@ static int _selfrefok(SEXP x, Rboolean checkNames, Rboolean verbose) {
     if (!(isNull(tag) || isString(tag))) error("Internal error: .internal.selfref tag isn't NULL or a character vector");
     names = getAttrib(x, R_NamesSymbol);
     if (names != tag && isString(names))
-        SET_TRUELENGTH(names, LENGTH(names)); 
+        SET_TRUELENGTH(names, LENGTH(names));
         // R copied this vector not data.table; it's not actually over-allocated. It looks over-allocated
         // because R copies the original vector's tl over despite allocating length.
     prot = R_ExternalPtrProtected(v);
@@ -123,7 +157,7 @@ static SEXP shallow(SEXP dt, SEXP cols, R_len_t n)
     //        so that the next change knows to duplicate.
     //        Does copyMostAttrib duplicate each attrib or does it point? It seems to point, hence DUPLICATE_ATTRIB
     //        for now otherwise example(merge.data.table) fails (since attr(d4,"sorted") gets written by setnames).
-    names = getAttrib(dt, R_NamesSymbol); 
+    names = getAttrib(dt, R_NamesSymbol);
     PROTECT(newnames = allocVector(STRSXP, n));
     protecti++;
     if (isNull(cols)) {
@@ -132,16 +166,16 @@ static SEXP shallow(SEXP dt, SEXP cols, R_len_t n)
         if (length(names)) {
             if (length(names) < l) error("Internal error: length(names)>0 but <length(dt)");
             for (i=0; i<l; i++) SET_STRING_ELT(newnames, i, STRING_ELT(names,i));
-        } 
+        }
         // else an unnamed data.table is valid e.g. unname(DT) done by ggplot2, and .SD may have its names cleared in dogroups, but shallow will always create names for data.table(NULL) which has 100 slots all empty so you can add to an empty data.table by reference ok.
     } else {
         l = length(cols);
         for (i=0; i<l; i++) SET_VECTOR_ELT(newdt, i, VECTOR_ELT(dt,INTEGER(cols)[i]-1));
         if (length(names)) {
-            // no need to check length(names) < l here. R-level checks if all value 
-            // in 'cols' are valid - in the range of 1:length(names(x))            
+            // no need to check length(names) < l here. R-level checks if all value
+            // in 'cols' are valid - in the range of 1:length(names(x))
             for (i=0; i<l; i++) SET_STRING_ELT( newnames, i, STRING_ELT(names,INTEGER(cols)[i]-1) );
-        } 
+        }
     }
     setAttrib(newdt, R_NamesSymbol, newnames);
     // setAttrib appears to change length and truelength, so need to do that first _then_ SET next,
@@ -167,29 +201,41 @@ SEXP alloccol(SEXP dt, R_len_t n, Rboolean verbose)
     l = LENGTH(dt);
     names = getAttrib(dt,R_NamesSymbol);
     // names may be NULL when null.data.table() passes list() to alloccol for example.
-    // So, careful to use length() on names, not LENGTH(). 
+    // So, careful to use length() on names, not LENGTH().
     if (length(names)!=l) error("Internal error: length of names (%d) is not length of dt (%d)",length(names),l);
     if (!selfrefok(dt,verbose))
-        return shallow(dt,R_NilValue,(n>l) ? n : l);  // e.g. test 848 and 851 in R > 3.0.2 
+        return shallow(dt,R_NilValue,(n>l) ? n : l);  // e.g. test 848 and 851 in R > 3.0.2
         // added (n>l) ? ... for #970, see test 1481.
     // TO DO:  test realloc names if selfrefnamesok (users can setattr(x,"name") themselves for example.
     // if (TRUELENGTH(getAttrib(dt,R_NamesSymbol))!=tl)
     //    error("Internal error: tl of dt passes checks, but tl of names (%d) != tl of dt (%d)", tl, TRUELENGTH(getAttrib(dt,R_NamesSymbol)));
-    
+
     tl = TRUELENGTH(dt);
     if (tl<0) error("Internal error, tl of class is marked but tl<0.");  // R <= 2.13.2 and we didn't catch uninitialized tl somehow
     if (tl>0 && tl<l) error("Internal error, please report (including result of sessionInfo()) to datatable-help: tl (%d) < l (%d) but tl of class is marked.", tl, l);
-    if (tl>l+1000) warning("tl (%d) is greater than 1000 items over-allocated (l = %d). If you didn't set the datatable.alloccol option to be very large, please report this to datatable-help including the result of sessionInfo().",tl,l);
+    if (tl>l+10000) warning("tl (%d) is greater than 10,000 items over-allocated (l = %d). If you didn't set the datatable.alloccol option to be very large, please report this to datatable-help including the result of sessionInfo().",tl,l);
     if (n>tl) return(shallow(dt,R_NilValue,n)); // usual case (increasing alloc)
-    if (n<tl) warning("Attempt to reduce allocation from %d to %d ignored. Can only increase allocation via shallow copy.",tl,n);
+    if (n<tl && verbose) Rprintf("Attempt to reduce allocation from %d to %d ignored. Can only increase allocation via shallow copy. Please do not use DT[...]<- or DT$someCol<-. Use := inside DT[...] instead.",tl,n);
               // otherwise the finalizer can't clear up the Large Vector heap
     return(dt);
 }
 
 SEXP alloccolwrapper(SEXP dt, SEXP newncol, SEXP verbose) {
-    if (!isInteger(newncol) || length(newncol)!=1) error("n must be integer length 1. Has datatable.alloccol somehow become unset?");
-    if (!isLogical(verbose) || length(verbose)!=1) error("verbose must be TRUE or FALSE"); 
-    return(alloccol(dt, INTEGER(newncol)[0], LOGICAL(verbose)[0]));
+    if (!isInteger(newncol) || length(newncol)!=1) error("n must be integer length 1. Has getOption('datatable.alloccol') somehow become unset?");
+    if (!isLogical(verbose) || length(verbose)!=1) error("verbose must be TRUE or FALSE");
+
+    SEXP ans = PROTECT(alloccol(dt, INTEGER(newncol)[0], LOGICAL(verbose)[0]));
+
+    for(R_len_t i = 0; i < LENGTH(ans); i++) {
+        // clear the same excluded by copyMostAttrib(). Primarily for data.table and as.data.table, but added here centrally (see #4890).
+
+	setAttrib(VECTOR_ELT(ans, i), R_NamesSymbol, R_NilValue);
+	setAttrib(VECTOR_ELT(ans, i), R_DimSymbol, R_NilValue);
+	setAttrib(VECTOR_ELT(ans, i), R_DimNamesSymbol, R_NilValue);
+    }
+
+    UNPROTECT(1);
+    return ans;
 }
 
 SEXP shallowwrapper(SEXP dt, SEXP cols) {
@@ -236,18 +282,18 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
     // cols : column names or numbers corresponding to the values to set
     // rows : row numbers to assign
     R_len_t i, j, nrow, targetlen, vlen, r, oldncol, oldtncol, coln, protecti=0, newcolnum;
-    SEXP targetcol, RHS, names, nullint, thisvalue, thisv, targetlevels, newcol, s, colnam, class, tmp, colorder, key, index, a;
+    SEXP targetcol, RHS, names, nullint, thisvalue, thisv, targetlevels, newcol, s, colnam, class, tmp, colorder, key, index, a, assignedNames, indexNames;
     SEXP bindingIsLocked = getAttrib(dt, install(".data.table.locked"));
     Rboolean verbose = LOGICAL(verb)[0], anytodelete=FALSE, isDataTable=FALSE;
-    char *s1, *s2, *s3;
-    const char *c1, *c2, *tc1, *tc2;
-    int *buf, k=0;
+    char *s1, *s2, *s3, *s4, *s5;
+    const char *c1, *tc1, *tc2;
+    int *buf, k=0, newKeyLength;
     size_t size; // must be size_t otherwise overflow later in memcpy
     if (isNull(dt)) error("assign has been passed a NULL dt");
     if (TYPEOF(dt) != VECSXP) error("dt passed to assign isn't type VECSXP");
     if (length(bindingIsLocked) && LOGICAL(bindingIsLocked)[0])
         error(".SD is locked. Updating .SD by reference using := or set are reserved for future use. Use := in j directly. Or use copy(.SD) as a (slow) last resort, until shallow() is exported.");
-    
+
     class = getAttrib(dt, R_ClassSymbol);
     if (isNull(class)) error("Input passed to assign has no class attribute. Must be a data.table or data.frame.");
     // Check if there is a class "data.table" somewhere (#5115).
@@ -275,27 +321,33 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
     nrow = length(VECTOR_ELT(dt,0));
     if (isNull(rows)) {
         targetlen = nrow;
+        if (verbose) Rprintf("Assigning to all %d rows\n", nrow);
         // fast way to assign to whole column, without creating 1:nrow(x) vector up in R, or here in C
     } else {
-        if (!LENGTH(rows)) return(dt);
         if (isReal(rows)) {
             rows = PROTECT(rows = coerceVector(rows, INTSXP));
             protecti++;
             warning("Coerced i from numeric to integer. Please pass integer for efficiency; e.g., 2L rather than 2");
-        }    
+        }
         if (!isInteger(rows))
             error("i is type '%s'. Must be integer, or numeric is coerced with warning. If i is a logical subset, simply wrap with which(), and take the which() outside the loop if possible for efficiency.", type2char(TYPEOF(rows)));
         targetlen = length(rows);
-        Rboolean anyToDo = FALSE;
-        for (i=0;i<targetlen;i++) {
+        int numToDo = 0;
+        for (i=0; i<targetlen; i++) {
             if ((INTEGER(rows)[i]<0 && INTEGER(rows)[i]!=NA_INTEGER) || INTEGER(rows)[i]>nrow)
                 error("i[%d] is %d which is out of range [1,nrow=%d].",i+1,INTEGER(rows)[i],nrow);
-            if (INTEGER(rows)[i]>=1) anyToDo = TRUE;
+            if (INTEGER(rows)[i]>=1) numToDo++;
         }
-        if (!anyToDo) return(dt);  // all items of rows either 0 or NA, nothing to do.  
+        if (verbose) Rprintf("Assigning to %d row subset of %d rows\n", numToDo, nrow);
+        // TODO: include in message if any rows are assigned several times (e.g. by=.EACHI with dups in i)
+        if (numToDo==0) {
+            if (!length(newcolnames)) return(dt); // all items of rows either 0 or NA. !length(newcolnames) for #759
+            if (verbose) Rprintf("Added %d new column%s initialized with all-NA\n",
+                                 length(newcolnames), (length(newcolnames)>1)?"s":"");
+        }
     }
     if (!length(cols)) {
-        warning("length(LHS) = 0, meaning no columns to delete or assign RHS to.");
+        warning("length(LHS)==0; no columns to delete or assign RHS to.");
         return(dt);
     }
     // FR #2077 - set able to add new cols by reference
@@ -310,7 +362,7 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
             if (!isDataTable) error("set() on a data.frame is for changing existing columns, not adding new ones. Please use a data.table for that. data.table's are over-allocated and don't shallow copy.");
             PROTECT(newcolnames = allocVector(STRSXP, k));
             protecti++;
-            for (i=0; i<k; i++) { 
+            for (i=0; i<k; i++) {
                 SET_STRING_ELT(newcolnames, i, STRING_ELT(cols, buf[i]));
                 INTEGER(tmp)[buf[i]] = oldncol+i+1;
             }
@@ -337,10 +389,10 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
             if (length(cols)>1) {
                 if (length(values)==0) error("Supplied %d columns to be assigned an empty list (which may be an empty data.table or data.frame since they are lists too). To delete multiple columns use NULL instead. To add multiple empty list columns, use list(list()).", length(cols));
                 if (length(values)>length(cols))
-                    warning("Supplied %d columns to be assigned a list (length %d) of values (%d unused)", length(cols), length(values), length(values)-length(cols));  
+                    warning("Supplied %d columns to be assigned a list (length %d) of values (%d unused)", length(cols), length(values), length(values)-length(cols));
                 else if (length(cols)%length(values) != 0)
                     warning("Supplied %d columns to be assigned a list (length %d) of values (recycled leaving remainder of %d items).",length(cols),length(values),length(cols)%length(values));
-            } // else it's a list() column being assigned to one column       
+            } // else it's a list() column being assigned to one column
         }
     }
     // Check all inputs :
@@ -372,7 +424,7 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
                     warning("Adding new column '%s' then assigning NULL (deleting it).",CHAR(STRING_ELT(newcolnames,newcolnum)));
                     continue;
                 }
-                error("RHS of assignment to new column '%s' is zero length but not empty list(). For new columns the RHS must either be empty list() to create an empty list column, or, have length > 0; e.g. NA_integer_, 0L, etc.", CHAR(STRING_ELT(newcolnames,newcolnum)));
+                // RHS of assignment to new column is zero length but we'll use its type to create all-NA column of that type
             }
         }
         if (!(isVectorAtomic(thisvalue) || isNewList(thisvalue)))  // NULL had a continue earlier above
@@ -380,24 +432,24 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
         if (isMatrix(thisvalue) && (j=INTEGER(getAttrib(thisvalue, R_DimSymbol))[1]) > 1)  // matrix passes above (considered atomic vector)
             warning("%d column matrix RHS of := will be treated as one vector", j);
         if ((coln+1)<=oldncol && isFactor(VECTOR_ELT(dt,coln)) &&
-            !isString(thisvalue) && TYPEOF(thisvalue)!=INTSXP && !isReal(thisvalue) && !isNewList(thisvalue))  // !=INTSXP includes factor
+            !isString(thisvalue) && TYPEOF(thisvalue)!=INTSXP && TYPEOF(thisvalue)!=LGLSXP && !isReal(thisvalue) && !isNewList(thisvalue))  // !=INTSXP includes factor
             error("Can't assign to column '%s' (type 'factor') a value of type '%s' (not character, factor, integer or numeric)", CHAR(STRING_ELT(names,coln)),type2char(TYPEOF(thisvalue)));
-        if (nrow>0) {
+        if (nrow>0 && targetlen>0) {
             if (vlen>targetlen)
-                warning("Supplied %d items to be assigned to %d items of column '%s' (%d unused)", vlen, targetlen,CHAR(colnam),vlen-targetlen);  
+                warning("Supplied %d items to be assigned to %d items of column '%s' (%d unused)", vlen, targetlen,CHAR(colnam),vlen-targetlen);
             else if (vlen>0 && targetlen%vlen != 0)
                 warning("Supplied %d items to be assigned to %d items of column '%s' (recycled leaving remainder of %d items).",vlen,targetlen,CHAR(colnam),targetlen%vlen);
         }
     }
-    // having now checked the inputs, from this point there should be no errors,
-    // so we can now proceed to modify DT by reference.
+    // having now checked the inputs, from this point there should be no errors so we can now proceed to
+    // modify DT by reference. Other than if new columns are being added and the allocVec() fails with
+    // out-of-memory. In that case the user will receive hard halt and know to rerun.
     if (length(newcolnames)) {
-        //if (length(rows)!=0) error("Attempt to add new column(s) and set subset of rows at the same time. Create the new column(s) first, and then you'll be able to assign to a subset. If i is set to 1:nrow(x) then please remove that (no need, it's faster without).");
         oldtncol = TRUELENGTH(dt);   // TO DO: oldtncol can be just called tl now, as we won't realloc here any more.
-        
+
         if (oldtncol<oldncol) error("Internal error, please report (including result of sessionInfo()) to datatable-help: oldtncol (%d) < oldncol (%d) but tl of class is marked.", oldtncol, oldncol);
-        if (oldtncol>oldncol+1000L) warning("truelength (%d) is greater than 1000 items over-allocated (length = %d). See ?truelength. If you didn't set the datatable.alloccol option very large, please report this to datatable-help including the result of sessionInfo().",oldtncol, oldncol); 
-        
+        if (oldtncol>oldncol+10000L) warning("truelength (%d) is greater than 10,000 items over-allocated (length = %d). See ?truelength. If you didn't set the datatable.alloccol option very large, please report this to datatable-help including the result of sessionInfo().",oldtncol, oldncol);
+
         if (oldtncol < oldncol+LENGTH(newcolnames))
             error("Internal logical error. DT passed to assign has not been allocated enough column slots. l=%d, tl=%d, adding %d", oldncol, oldtncol, LENGTH(newcolnames));
         if (!selfrefnamesok(dt,verbose))
@@ -424,9 +476,9 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
             continue;   // delete column(s) afterwards, below this loop
         }
         vlen = length(thisvalue);
-        if (length(rows)==0 && targetlen==vlen) {
+        if (length(rows)==0 && targetlen==vlen && (vlen>0 || nrow==0)) {
             if (  NAMED(thisvalue)==2 ||  // set() protects the NAMED of atomic vectors from .Call setting arguments to 2 by wrapping with list
-                 (TYPEOF(values)==VECSXP && i>LENGTH(values)-1)) { // recycled RHS would have columns pointing to others, #2298.
+                 (TYPEOF(values)==VECSXP && i>LENGTH(values)-1)) { // recycled RHS would have columns pointing to others, #185.
                 if (verbose) {
                     if (NAMED(thisvalue)==2) Rprintf("RHS for item %d has been duplicated because NAMED is %d, but then is being plonked.\n",i+1, NAMED(thisvalue));
                     else Rprintf("RHS for item %d has been duplicated because the list of RHS values (length %d) is being recycled, but then is being plonked.\n", i+1, length(values));
@@ -442,10 +494,10 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
             continue;
         }
         if (coln+1 > oldncol) {  // new column
-            if (length(rows)) 
-                newcol = allocNAVector(TYPEOF(thisvalue),nrow);  // fill with NAs first for where 'rows' (a subset) doesn't touch
-            else              
-                newcol = allocVector(TYPEOF(thisvalue),nrow);    // PROTECT not needed, protected by SET_VECTOR_ELT on next line
+            newcol = allocNAVector(TYPEOF(thisvalue),nrow);
+            // initialize with NAs for when 'rows' is a subset and it doesn't touch
+            // do not try to save the time to NA fill (contiguous branch free assign anyway) since being
+            // sure all items will be written to (isNull(rows), length(rows), vlen<1, targetlen) is not worth the risk.
             SET_VECTOR_ELT(dt,coln,newcol);
             if (isVectorAtomic(thisvalue)) copyMostAttrib(thisvalue,newcol);  // class etc but not names
             // else for lists (such as data.frame and data.table) treat them as raw lists and drop attribs
@@ -495,8 +547,9 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
                                 PROTECT(addlevels = growVector(addlevels, length(addlevels)+1000));
                                 protecti++;
                             }
-                            SET_STRING_ELT(addlevels,addi,thisv);
-                            SET_TRUELENGTH(thisv,++addi+length(targetlevels));  
+                            SET_STRING_ELT(addlevels,addi++,thisv);
+                            // if-else for #1718 fix
+                            SET_TRUELENGTH(thisv, (thisv != NA_STRING) ? (addi+length(targetlevels)) : NA_INTEGER);
                         }
                         INTEGER(RHS)[j] = TRUELENGTH(thisv);
                     }
@@ -512,15 +565,17 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
                     savetl_end();
                 } else {
                     // value is either integer or numeric vector
-                    if (TYPEOF(thisvalue)!=INTSXP && !isReal(thisvalue))
+                    if (TYPEOF(thisvalue)!=INTSXP && TYPEOF(thisvalue)!=LGLSXP && !isReal(thisvalue))
                         error("Internal logical error. Up front checks (before starting to modify DT) didn't catch type of RHS ('%s') assigning to factor column '%s'. Please report to datatable-help.", type2char(TYPEOF(thisvalue)), CHAR(STRING_ELT(names,coln)));
-                    if (isReal(thisvalue)) {
+                    if (isReal(thisvalue) || TYPEOF(thisvalue)==LGLSXP) {
                         PROTECT(RHS = coerceVector(thisvalue,INTSXP));
                         protecti++;
-                        warning("Coerced 'double' RHS to 'integer' to match the factor column's underlying type. Character columns are now recommended (can be in keys), or coerce RHS to integer or character first.");
+                        // silence warning on singleton NAs
+                        if (INTEGER(RHS)[0] != NA_INTEGER) warning("Coerced '%s' RHS to 'integer' to match the factor column's underlying type. Character columns are now recommended (can be in keys), or coerce RHS to integer or character first.", type2char(TYPEOF(thisvalue)));
                     } else RHS = thisvalue;
                     for (j=0; j<length(RHS); j++) {
-                        if (INTEGER(RHS)[j]<1 || INTEGER(RHS)[j]>LENGTH(targetlevels)) {
+                        if ( (INTEGER(RHS)[j]<1 || INTEGER(RHS)[j]>LENGTH(targetlevels))
+                               && INTEGER(RHS)[j] != NA_INTEGER) {
                             warning("RHS contains %d which is outside the levels range ([1,%d]) of column %d, NAs generated", INTEGER(RHS)[j], LENGTH(targetlevels), i+1);
                             INTEGER(RHS)[j] = NA_INTEGER;
                         }
@@ -540,68 +595,135 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
                         protecti++;
                         // FR #2551, added test for equality between RHS and thisvalue to not provide the warning when length(thisvalue) == 1
                         if ( length(thisvalue) == 1 && TYPEOF(RHS) != VECSXP && TYPEOF(thisvalue) != VECSXP && (
-                             (isReal(thisvalue) && isInteger(targetcol) && REAL(thisvalue)[0] == INTEGER(RHS)[0]) || 
-                          (isLogical(thisvalue) && LOGICAL(thisvalue)[0] == NA_LOGICAL) || 
+                             (isReal(thisvalue) && isInteger(targetcol) && REAL(thisvalue)[0] == INTEGER(RHS)[0]) ||
+                          (isLogical(thisvalue) && LOGICAL(thisvalue)[0] == NA_LOGICAL) ||
                                    (isReal(RHS) && isInteger(thisvalue)) )) {
                               ;
                           } else {
                             s1 = (char *)type2char(TYPEOF(targetcol));
                             s2 = (char *)type2char(TYPEOF(thisvalue));
                             if (isReal(thisvalue)) s3="; may have truncated precision"; else s3="";
-                            warning("Coerced '%s' RHS to '%s' to match the column's type%s. Either change the target column to '%s' first (by creating a new '%s' vector length %d (nrows of entire table) and assign that; i.e. 'replace' column), or coerce RHS to '%s' (e.g. 1L, NA_[real|integer]_, as.*, etc) to make your intent clear and for speed. Or, set the column type correctly up front when you create the table and stick to it, please.", s2, s1, s3, s2, s2, LENGTH(VECTOR_ELT(dt,0)), s1);
+                            warning("Coerced '%s' RHS to '%s' to match the column's type%s. Either change the target column ['%s'] to '%s' first (by creating a new '%s' vector length %d (nrows of entire table) and assign that; i.e. 'replace' column), or coerce RHS to '%s' (e.g. 1L, NA_[real|integer]_, as.*, etc) to make your intent clear and for speed. Or, set the column type correctly up front when you create the table and stick to it, please.", s2, s1, s3, CHAR(STRING_ELT(names, coln)), s2, s2, LENGTH(VECTOR_ELT(dt,0)), s1);
                         }
                     }
                 }
             }
         }
-        memrecycle(targetcol, rows, 0, length(rows) ? LENGTH(rows) : LENGTH(targetcol), RHS);  // also called from dogroups
+        memrecycle(targetcol, rows, 0, targetlen, RHS);  // also called from dogroups where these arguments are used more
     }
-    key = getAttrib(dt,install("sorted"));
+    PROTECT(assignedNames = allocVector(STRSXP, LENGTH(cols)));
+    protecti++;
+    for (i=0;i<LENGTH(cols);i++) SET_STRING_ELT(assignedNames,i,STRING_ELT(names,INTEGER(cols)[i]-1));
+    key = getAttrib(dt, sym_sorted);
     if (length(key)) {
-        // if assigning to any key column, then drop the key. any() and subsetVector() don't seem to be
-        // exposed by R API at C level, so this is done here long hand.
-        PROTECT(tmp = allocVector(STRSXP, LENGTH(cols)));
+        // if assigning to at least one key column, the key is truncated to one position before the first changed column.
+        //any() and subsetVector() don't seem to be exposed by R API at C level, so this is done here long hand.
+        PROTECT(tmp = chmatch(key, assignedNames, 0, TRUE));
         protecti++;
-        for (i=0;i<LENGTH(cols);i++) SET_STRING_ELT(tmp,i,STRING_ELT(names,INTEGER(cols)[i]-1));
-        if (length(key)) {
-            PROTECT(tmp = chmatch(tmp, key, 0, TRUE));
-            protecti++;
-            for (i=0;i<LENGTH(tmp);i++) if (LOGICAL(tmp)[i]) {
-                // If a key column is being assigned to, clear the key, since it may change the row ordering.
-                // More likely that users will assign to non-key columns, though, most of the time.
-                setAttrib(dt, install("sorted"), R_NilValue);
-                break;
-            }
+        newKeyLength = xlength(key);
+        for (i=0;i<LENGTH(tmp);i++) if (LOGICAL(tmp)[i]) {
+            // If a key column is being assigned to, set newKeyLength to the key element before since everything after that may have changed in order.
+            newKeyLength = i;
+            break;
         }
+        if(newKeyLength == 0){
+          // no valid key columns remain, remove the key
+          setAttrib(dt, sym_sorted, R_NilValue);
+        } else if (newKeyLength < xlength(key)){
+          // new key is shorter than original one. Reassign
+          PROTECT(tmp = allocVector(STRSXP, newKeyLength));
+          protecti++;
+          memcpy((char *)DATAPTR(tmp), (char *)DATAPTR(key), newKeyLength * sizeof(SEXP));
+          setAttrib(dt, sym_sorted, tmp);
+        }
+        //else: no key column changed, nothing to be done
     }
-    index = getAttrib(dt,install("index"));
+    index = getAttrib(dt, install("index"));
     if (index != R_NilValue) {
         s = ATTRIB(index);
-        while(s != R_NilValue) {
+        // get a vector with all index names
+        PROTECT(indexNames = allocVector(STRSXP, xlength(s)));
+        protecti++;
+        int indexNo = 0;
+        while(s != R_NilValue){
+            SET_STRING_ELT(indexNames, indexNo, PRINTNAME(TAG(s)));
+            indexNo++;
+            s = CDR(s);
+        }
+        s = ATTRIB(index); // reset to first element
+        indexNo = 0;
+        while(s != R_NilValue) { 
             a = TAG(s);
             tc1 = c1 = CHAR(PRINTNAME(a));  // the index name; e.g. "__col1__col2"
-            s = CDR(s);
-            for (i=0; i<LENGTH(cols); i++) {
-                tc2 = c2 = CHAR(STRING_ELT(names, INTEGER(cols)[i]-1));  // the column name being updated; e.g. "col1"
-                while (*tc1) {
-                    if (*tc1!='_' || *(tc1+1)!='_') error("Internal error: __ not found in index name");
-                    tc1 += 2;
-                    if (*tc1=='\0') error("Internal error: index name ends with trailing __");
-                    while (*tc1 && *tc2 && *tc1 == *tc2) { tc1++; tc2++; }
-                    if (*tc2=='\0' && (*tc1=='\0' || (*tc1=='_' && *(tc1+1)=='_'))) {
-                        if (verbose) {
-                            thisvalue = (TYPEOF(values)==VECSXP && LENGTH(values)>0) ? VECTOR_ELT(values,i%LENGTH(values)) : values;
-                            Rprintf("Dropping index '%s' due to %s '%s' (column %d)\n", c1+2, isNull(thisvalue) ? "delete of" : "update on", c2, INTEGER(cols)[i]);
-                        }
-                        setAttrib(index, a, R_NilValue);
-                        i = LENGTH(cols);  // skip remaining cols, have already deleted this index
-                        break;  // next index
-                    }
-                    tc2 = c2;   // back to start of column name being updated
-                    while (*tc1 && (*tc1!='_' || *(tc1+1)!='_')) tc1++;  // advance to next column in index name
+            if (*tc1!='_' || *(tc1+1)!='_') {
+                // fix for #1396
+                if (verbose) {
+                    Rprintf("Dropping index '%s' as it doesn't have '__' at the beginning of its name. It was very likely created by v1.9.4 of data.table.\n", tc1);
                 }
-                tc1 = c1;
+                setAttrib(index, a, R_NilValue);
+                indexNo++;
+                s = CDR(s);
+                continue; // with next index
             }
+            tc1 += 2; // tc1 always marks the start of a key column
+            if (!*tc1) error("Internal error: index name ends with trailing __");
+            // check the position of the first appearance of an assigned column in the index.
+            // the new index will be truncated to this position.
+            s4 = (char*) malloc(strlen(c1) + 3);
+            if(s4 == NULL){
+              error("Internal error: Couldn't allocate memory for s4.");
+            }
+            memcpy(s4, c1, strlen(c1));
+            memset(s4 + strlen(c1), '\0', 1);
+            strcat(s4, "__"); // add trailing '__' to newKey so we can search for pattern '__colName__' also at the end of the index.
+            newKeyLength = strlen(c1);
+            for(int i = 0; i < xlength(assignedNames); i++){
+                tc2 = CHAR(STRING_ELT(assignedNames, i));
+                s5 = (char*) malloc(strlen(tc2) + 5); //4 * '_' + \0
+                if(s5 == NULL){
+                  free(s4);
+                  error("Internal error: Couldn't allocate memory for s5.");
+                }
+                memset(s5, '_', 2);
+                memset(s5 + 2, '\0', 1);
+                strcat(s5, tc2);
+                strcat(s5, "__");
+                tc2 = strstr(s4, s5);
+                if(tc2 == NULL){ // column is not part of key
+                    free(s5);
+                    continue;
+                }
+                if(tc2 - s4 < newKeyLength){ // new column match is before last match
+                  newKeyLength = tc2 - s4;
+                }
+                free(s5);
+            }
+            memset(s4 + newKeyLength, '\0', 1); // truncate the new key to the new length
+            if(newKeyLength == 0){ // no valid key column remains. Drop the key
+                setAttrib(index, a, R_NilValue);
+                SET_STRING_ELT(indexNames, indexNo, NA_STRING);
+                if (verbose) {
+                  Rprintf("Dropping index '%s' due to an update on a key column\n", c1+2);
+                }
+            } else if(newKeyLength < strlen(c1)){
+                if(LOGICAL(chmatch(mkString(s4), indexNames, 0, TRUE))[0]) { // index is shortened, but shortened version is already covered by other index.
+                    setAttrib(index, a, R_NilValue);
+                    SET_STRING_ELT(indexNames, indexNo, NA_STRING);
+                    if (verbose) {
+                      Rprintf("Dropping index '%s' due to an update on a key column\n", c1+2);
+                    }
+                } else { 
+                    // rename index to shortened version
+                    SET_TAG(s, install(s4));
+                    SET_STRING_ELT(indexNames, indexNo, mkChar(s4));
+                    if (verbose) {
+                      Rprintf("Shortening index '%s' to '%s' due to an update on a key column\n", c1+2, s4 + 2);
+                    }
+                }
+            } //else: index is not affected by assign: nothing to be done
+            free(s4);
+            indexNo ++;
+            s = CDR(s);
         }
     }
     if (anytodelete) {
@@ -614,7 +736,7 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
         protecti++;
         // Can't find a visible R entry point to return ordering of cols, above is only way I could find.
         // Need ordering (rather than just sorting) because the RHS corresponds in order to the LHS.
-        
+
         for (r=LENGTH(cols)-1; r>=0; r--) {
             i = INTEGER(colorder)[r]-1;
             coln = INTEGER(cols)[i]-1;
@@ -626,14 +748,14 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
                 // A new column being assigned NULL would have been warned above, added above, and now deleted (just easier
                 // to code it this way e.g. so that other columns may be added or removed ok by the same query).
                 size=sizeof(SEXP *);
-                memmove((char *)DATAPTR(dt)+coln*size,     
+                memmove((char *)DATAPTR(dt)+coln*size,
                         (char *)DATAPTR(dt)+(coln+1)*size,
                         (LENGTH(dt)-coln-1)*size);
                 SET_VECTOR_ELT(dt, LENGTH(dt)-1, R_NilValue);
                 SETLENGTH(dt, LENGTH(dt)-1);
                 // adding using := by group relies on NULL here to know column slot is empty.
                 // good to tidy up the vector anyway.
-                memmove((char *)DATAPTR(names)+coln*size,     
+                memmove((char *)DATAPTR(names)+coln*size,
                     (char *)DATAPTR(names)+(coln+1)*size,
                     (LENGTH(names)-coln-1)*size);
                 SET_STRING_ELT(names, LENGTH(names)-1, NA_STRING);  // no need really, just to be tidy.
@@ -652,16 +774,41 @@ SEXP assign(SEXP dt, SEXP rows, SEXP cols, SEXP newcolnames, SEXP values, SEXP v
     return(dt);  // needed for `*tmp*` mechanism (when := isn't used), and to return the new object after a := for compound syntax.
 }
 
+static Rboolean anyNamed(SEXP x) {
+    if (NAMED(x)) return TRUE;
+    if (isNewList(x)) for (int i=0; i<LENGTH(x); i++)
+        if (anyNamed(VECTOR_ELT(x,i))) return TRUE;
+    return FALSE;
+}
+
 void memrecycle(SEXP target, SEXP where, int start, int len, SEXP source)
 // like memcpy but recycles source and takes care of aging
 // 'where' a 1-based INTEGER vector subset of target to assign to,  or NULL or integer()
 // assigns to target[start:start+len-1] or target[where[start:start+len-1]]  where start is 0-based
 {
-    int r = 0, w;
+    int r=0, w, protecti=0;
     if (len<1) return;
     int slen = length(source) > len ? len : length(source); // fix for 5647. when length(source) > len, slen must be len.
     if (slen<1) return;
     if (TYPEOF(target) != TYPEOF(source)) error("Internal error: TYPEOF(target)['%s']!=TYPEOF(source)['%s']", type2char(TYPEOF(target)),type2char(TYPEOF(source)));
+    if (isNewList(source)) {
+        // A list() column; i.e. target is a column of pointers to SEXPs rather than the much more common case
+        // where memrecycle copies the DATAPTR data to the atomic target from the atomic source.
+        // If any item within the list is NAMED then take a fresh copy. So far this has occurred from dogroups.c when
+        // j returns .BY or similar specials as-is within a list(). Those specials are static inside
+        // dogroups so if we don't copy now the last value written to them by dogroups becomes repeated in the result;
+        // i.e. the wrong result.
+        // If source is itself recycled later (many list() column items pointing to the same object) we are ok with that
+        // since we now have a fresh copy and := will not assign with a list() column's cell value; := only changes the
+        // SEXP pointed to.
+        // If source is already not named (because j already created a fresh unnamed vector within a list()) we don't want to
+        // duplicate unnecessarily, hence checking for named rather than duplicating always.
+        // See #481 and #1270
+        if (anyNamed(source)) {
+            source = PROTECT(duplicate(source));
+            protecti++;
+        }
+    }
     size_t size = SIZEOF(target);
     if (!length(where)) {
         switch (TYPEOF(target)) {
@@ -679,7 +826,7 @@ void memrecycle(SEXP target, SEXP where, int start, int len, SEXP source)
         default :
             error("Unsupported type '%s'", type2char(TYPEOF(target)));
         }
-        if (slen == 1) {  
+        if (slen == 1) {
             if (size==4) for (; r<len; r++)
                 INTEGER(target)[start+r] = INTEGER(source)[0];   // copies pointer on 32bit, sizes checked in init.c
             else for (; r<len; r++)
@@ -717,7 +864,7 @@ void memrecycle(SEXP target, SEXP where, int start, int len, SEXP source)
             break;
         default :
             error("Unsupported type '%s'", type2char(TYPEOF(target)));
-        }    
+        }
         if (slen == 1) {
             if (size==4) for (; r<len; r++) {
                 w = INTEGER(where)[start+r]; if (w<1) continue;
@@ -737,12 +884,13 @@ void memrecycle(SEXP target, SEXP where, int start, int len, SEXP source)
         }
         // if slen>10 it may be worth memcpy, but we'd need to first know if 'where' was a contiguous subset
     }
+    UNPROTECT(protecti);
 }
 
 SEXP allocNAVector(SEXPTYPE type, R_len_t n)
 {
     // an allocVector following with initialization to NA since a subassign to a new column using :=
-    // routinely leaves untouched items (rather than 0 or "" as allocVector does with it's memset)
+    // routinely leaves untouched items (rather than 0 or "" as allocVector does with its memset)
     // We guess that author of allocVector would have liked to initialize with NA but was prevented since memset
     // is restricted to one byte.
     R_len_t i;

@@ -1,5 +1,5 @@
 
-bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, verbose)
+bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, mult, ops, nqgrp, nqmaxgrp, verbose)
 {
     # TO DO: rename leftcols to icols, rightcols to xcols
     # NB: io is currently just TRUE or FALSE for whether i is keyed
@@ -8,9 +8,9 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
     # types of i join columns are promoted to match x's types (with warning or verbose)
 
     # Important that i is already passed in as a shallow copy, due to these coercions for factors.
-    # i.e. bmerge(i<-shallow(i),...)  
+    # i.e. bmerge(i<-shallow(i),...)
     # The caller ([.data.table) then uses the coerced columns to build the output
-    
+
     # careful to only plonk syntax (full column) on i from now on (otherwise i would change)
     # TO DO: enforce via .internal.shallow attribute and expose shallow() to users
     # This is why shallow() is very importantly internal only, currently.
@@ -48,7 +48,7 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
             }
             # Retain original levels of i's factor columns in factor to factor joins (important when NAs,
             # see tests 687 and 688).
-            # Moved it outside of 'else' to fix #499 and #945. 
+            # Moved it outside of 'else' to fix #499 and #945.
             resetifactor = c(resetifactor,lc)
             if (roll!=0.0 && a==length(leftcols)) stop("Attempting roll join on factor column x.",names(x)[rc],". Only integer, double or character colums may be roll joined.")   # because the chmatch on next line returns <strike>NA</strike> <new>0</new> for missing chars in x (rather than some integer greater than existing). Note roll!=0.0 is ok in this 0 special floating point case e.g. as.double(FALSE)==0.0 is ok, and "nearest"!=0.0 is also true.
             val = origi[[lc]] # note: using 'origi' here because set(..., value = .) always copies '.', we need a way to avoid it in internal cases.
@@ -62,7 +62,7 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
             # <OUTDATED> NAs can be produced by this level match, in which case the C code (it knows integer value NA)
             # can skip over the lookup. It's therefore important we pass NA rather than 0 to the C code.
         }
-        # Fix for #1108. 
+        # Fix for #1108.
         # TODO: clean this code up...
         # NOTE: bit64::is.double(int64) returns FALSE.. but base::is.double returns TRUE
         is.int64 <- function(x) inherits(x, 'integer64')
@@ -89,22 +89,20 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
             set(i, j=lc, value=newval)
         }
     }
-        
-    # Now that R doesn't copy named inputs to list(), we can return these as a list()
-    # TO DO: could be allocated inside Cbmerge and returned as list from that
-    f__ = integer(nrow(i))
-    len__ = integer(nrow(i))
-    allLen1 = logical(1)
-    
     if (verbose) {last.started.at=proc.time()[3];cat("Starting bmerge ...");flush.console()}
-    .Call(Cbmerge, i, x, as.integer(leftcols), as.integer(rightcols), io<-haskey(i), xo, roll, rollends, nomatch, f__, len__, allLen1)
+    ans = .Call(Cbmerge, i, x, as.integer(leftcols), as.integer(rightcols), io<-haskey(i), xo, roll, rollends, nomatch, mult, ops, nqgrp, nqmaxgrp)
     # NB: io<-haskey(i) necessary for test 579 where the := above change the factor to character and remove i's key
-    if (verbose) {cat("done in",round(proc.time()[3]-last.started.at,3),"secs\n");flush.console}
-    
-    for (ii in resetifactor) set(i,j=ii,value=origi[[ii]])  # in the caller's shallow copy,  see comment at the top of this function for usage
+    if (verbose) {cat("done in",round(proc.time()[3]-last.started.at,3),"secs\n");flush.console()}
+
+    # in the caller's shallow copy,  see comment at the top of this function for usage
     # We want to leave the coercions to i in place otherwise, since the caller depends on that to build the result
-    
-    return(list(starts=f__, lens=len__, allLen1=allLen1))
+    if (length(resetifactor)) {
+        for (ii in resetifactor)
+            set(i,j=ii,value=origi[[ii]])
+        if (haskey(origi))
+            setattr(i, 'sorted', key(origi))
+    }
+    return(ans)
 }
 
 
